@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"io"
+	"strings"
 	"net/url"
 
 	"github.com/libdns/libdns"
@@ -16,20 +18,22 @@ func (p *Provider) createRecord(ctx context.Context, zoneInfo netlifyZone, recor
 	if err != nil {
 		return netlifyDNSRecord{}, err
 	}
-	p.Logger.Info(zoneInfo.Name)
-	p.Logger.Info(record.Name)
-	p.Logger.Info(record.Value)
 	reqURL := fmt.Sprintf("%s/dns_zones/%s/dns_records", baseURL, zoneInfo.ID)
-	p.Logger.Info(reqURL)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(jsonBytes))
 	if err != nil {
 		return netlifyDNSRecord{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-
-	var result netlifyDNSRecord
-	_, err = p.doAPIRequest(req, &result)
+	var res []byte
+	res, err = p.doAPIRequest(req)
 	if err != nil {
+		p.Logger.Error(err.Error())
+		return netlifyDNSRecord{}, err
+	}
+	var result netlifyDNSRecord
+	err = json.Unmarshal(res,&result)
+	if err != nil {
+		p.Logger.Error(err.Error())
 		return netlifyDNSRecord{}, err
 	}
 
@@ -48,12 +52,24 @@ func (p *Provider) updateRecord(ctx context.Context, oldRec netlifyDNSRecord, ne
 	// PATCH changes only the populated fields; PUT resets Type, Name, Content, and TTL even if empty
 	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, reqURL, bytes.NewReader(jsonBytes))
 	if err != nil {
+		p.Logger.Error(err.Error())
 		return netlifyDNSRecord{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
+	var res []byte
+	res, err = p.doAPIRequest(req)
+	if err != nil {
+		p.Logger.Error(err.Error())
+		return netlifyDNSRecord{}, err
+	}
 	var result netlifyDNSRecord
-	_, err = p.doAPIRequest(req, &result)
+	err = json.Unmarshal(res, &result)
+	if err != nil {
+		p.Logger.Error(err.Error())
+		return netlifyDNSRecord{}, err
+	}
+
 	return result, err
 }
 
@@ -65,14 +81,25 @@ func (p *Provider) getDNSRecords(ctx context.Context, zoneInfo netlifyZone, rec 
 		qs.Set("content", rec.Value)
 	}
 
-	reqURL := fmt.Sprintf("%s/zones/%s/dns_records/%s", baseURL, zoneInfo.ID, qs.Encode())
+	reqURL := fmt.Sprintf("%s/zones/%s/dns_records?%s", baseURL, zoneInfo.ID, qs.Encode())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
+		p.Logger.Error(err.Error())
 		return nil, err
 	}
 
+	var res []byte
+	res, err = p.doAPIRequest(req)
+	if err != nil {
+		p.Logger.Error(err.Error())
+		return nil, err
+	}
 	var results []netlifyDNSRecord
-	_, err = p.doAPIRequest(req, &results)
+	err = json.Unmarshal(res,&results)
+	if err != nil {
+		p.Logger.Error(err.Error())
+		return nil, err
+	}
 	return results, err
 }
 
@@ -87,19 +114,27 @@ func (p *Provider) getZoneInfo(ctx context.Context, zoneName string) (netlifyZon
 	if zone, ok := p.zones[zoneName]; ok {
 		return zone, nil
 	}
-
+	zoneName = strings.TrimRight(zoneName,".")
 	qs := make(url.Values)
 	qs.Set("name", zoneName)
-	reqURL := fmt.Sprintf("%s/dns_zones?%s", baseURL, qs)
+	reqURL := fmt.Sprintf("%s/dns_zones?%s", baseURL, qs.Encode())
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
+		p.Logger.Error(err.Error())
 		return netlifyZone{}, err
 	}
 
-	var zones []netlifyZone
-	_, err = p.doAPIRequest(req, &zones)
+	var resp []byte
+	resp, err = p.doAPIRequest(req)
 	if err != nil {
+		p.Logger.Error(err.Error())
+		return netlifyZone{}, err
+	}
+	var zones []netlifyZone
+	err = json.Unmarshal(resp, &zones)
+	if err != nil {
+		p.Logger.Error(err.Error())
 		return netlifyZone{}, err
 	}
 	if len(zones) != 1 {
@@ -108,7 +143,6 @@ func (p *Provider) getZoneInfo(ctx context.Context, zoneName string) (netlifyZon
 
 	// cache this zone for possible reuse
 	p.zones[zoneName] = zones[0]
-
 	return zones[0], nil
 }
 
@@ -117,37 +151,33 @@ func (p *Provider) getZoneInfo(ctx context.Context, zoneName string) (netlifyZon
 // error including error information from the API if applicable. If result is a
 // non-nil pointer, the result field from the API response will be decoded into
 // it for convenience.
-func (p *Provider) doAPIRequest(req *http.Request, result interface{}) (netlifyResponse, error) {
+func (p *Provider) doAPIRequest(req *http.Request) ([]byte, error) {
 	req.Header.Set("Authorization", "Bearer "+p.PersonnalAccessToken)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return netlifyResponse{}, err
+		p.Logger.Error("Error in request")
+		return nil, err
 	}
 	defer resp.Body.Close()
 
-	var respData netlifyResponse
-	err = json.NewDecoder(resp.Body).Decode(&respData)
+	bytes, err := io.ReadAll(resp.Body)
+
 	if err != nil {
-		return netlifyResponse{}, err
+		p.Logger.Error(err.Error())
+		return nil, err
+	}
+
+	if err != nil {
+		p.Logger.Error(err.Error())
+		return nil, err
 	}
 
 	if resp.StatusCode >= 400 {
-		return netlifyResponse{}, fmt.Errorf("got error status: HTTP %d: %+v", resp.StatusCode, respData.Errors)
+		p.Logger.Error("Error in HTTP")
+		return nil, fmt.Errorf("got error status: HTTP %d", resp.StatusCode)
 	}
-	if len(respData.Errors) > 0 {
-		return netlifyResponse{}, fmt.Errorf("got errors: HTTP %d: %+v", resp.StatusCode, respData.Errors)
-	}
-	p.Logger.Info(string(respData.Result))
-	if len(respData.Result) > 0 && result != nil {
-		err = json.Unmarshal(respData.Result, result)
-		if err != nil {
-			return netlifyResponse{}, err
-		}
-		respData.Result = nil
-	}
-
-	return respData, err
+	return bytes, nil
 }
 
 const baseURL = "https://api.netlify.com/api/v1"

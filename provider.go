@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"encoding/json"
 
 	"github.com/libdns/libdns"
 	"go.uber.org/zap"
@@ -37,14 +38,19 @@ func (p *Provider) GetRecords(ctx context.Context, zone string) ([]libdns.Record
 		return nil, err
 	}
 
-	var result []netlifyDNSRecord
-	_, err = p.doAPIRequest(req, &result)
+	var records []netlifyDNSRecord
+	var result []byte
+	result, err = p.doAPIRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	err = json.Unmarshal(result,&records)
 	if err != nil {
 		return nil, err
 	}
 
-	recs := make([]libdns.Record, 0, len(result))
-	for _, rec := range result {
+	recs := make([]libdns.Record, 0, len(records))
+	for _, rec := range records {
 		recs = append(recs, rec.libdnsRecord(zone))
 	}
 
@@ -108,13 +114,18 @@ func (p *Provider) DeleteRecords(ctx context.Context, zone string, records []lib
 				return nil, err
 			}
 
-			var result netlifyDNSRecord
-			_, err = p.doAPIRequest(req, &result)
+			var record netlifyDNSRecord
+			var result []byte
+			result, err = p.doAPIRequest(req)
+			if err != nil {
+				return nil, err
+			}
+			err = json.Unmarshal(result,&record)
 			if err != nil {
 				return nil, err
 			}
 
-			recs = append(recs, result.libdnsRecord(zone))
+			recs = append(recs, record.libdnsRecord(zone))
 		}
 
 	}
